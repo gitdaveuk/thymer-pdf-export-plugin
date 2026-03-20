@@ -1,187 +1,237 @@
-/**
- * Export to PDF Plugin for Thymer
- *
- * - Exports the current note via browser print → Save as PDF
- * - Preserves headings and bullet lists
- * - Robust note title extraction (not the collection name)
- * - Chrome-safe printing
- */
-
 class Plugin extends AppPlugin {
 
-	onLoad() {
-		this.ui.addCommandPaletteCommand({
-			label: "Export to PDF",
-			icon: "ti-file-export",
-			onSelected: () => this.exportToPDF()
-		});
-	}
+    onLoad() {
+        this.ui.addCommandPaletteCommand({
+            label: "Export to PDF",
+            icon: "file-description",
+            onSelected: () => this.exportToPDF()
+        });
+    }
 
-	// Get the current note title
-	getNoteTitle() {
-		try {
-			// First, try editable input/textarea
-			const input = document.querySelector(
-				'.panel-heading input[type="text"], .panel-heading textarea'
-			);
-			const inputText = input?.value?.trim();
-			if (inputText) return inputText;
+    async exportToPDF() {
+        const panel = this.ui.getActivePanel();
+        const record = panel?.getActiveRecord();
 
-			// Next, try a contenteditable node
-			const editable = document.querySelector(
-				'.panel-heading [contenteditable="true"]'
-			);
-			const editText = editable?.innerText?.trim();
-			if (editText) return editText;
+        if (!record) {
+            this.ui.addToaster({
+                title: "Export to PDF",
+                message: "No document is currently open.",
+                dismissible: true,
+                autoDestroyTime: 3000,
+            });
+            return;
+        }
 
-			// Fallback: read the heading container text
-			const heading = document.querySelector('.panel-heading');
-			if (heading?.innerText?.trim()) {
-				let text = heading.innerText.trim();
+        const title = record.getName();
+        const lineItems = await record.getLineItems();
 
-				// If heading bytes include collection name prefix ("Collection — NoteTitle"),
-				// split on common separators like ' — ' or ' / ' or '|'
-				const separators = [' — ', ' / ', ' | '];
-				for (const sep of separators) {
-					if (text.includes(sep)) {
-						const parts = text.split(sep).map(s => s.trim()).filter(Boolean);
-						if (parts.length > 1) {
-							// assume the last part is the actual note title
-							text = parts[parts.length - 1];
-							break;
-						}
-					}
-				}
+        // Only top-level items — we'll recurse for children
+        const topLevel = lineItems.filter(i => i.parent_guid === record.guid);
 
-				return text;
-			}
+        const container = document.createElement('div');
+        container.id = 'thymer-pdf-export';
+        container.style.cssText = `
+            background: white;
+            color: black;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            font-size: 12pt;
+            line-height: 1.6;
+            padding: 0.75in;
+            max-width: 8.5in;
+        `;
 
-			return 'Untitled Note';
-		} catch {
-			return 'Untitled Note';
-		}
-	}
+        const h1 = document.createElement('h1');
+        h1.textContent = title;
+        h1.style.cssText = 'margin: 0 0 1em 0; font-size: 22pt; border-bottom: 1px solid #ddd; padding-bottom: 0.3em;';
+        container.appendChild(h1);
 
-	getAllContent() {
-		try {
-			const rows = document.querySelectorAll('.listitem');
-			const content = [];
+        this.renderItems(topLevel, container, lineItems, 0);
 
-			rows.forEach(row => {
-				const textEl =
-					row.querySelector('.listitem-content') ||
-					row.querySelector('.content') ||
-					row;
-				const text = textEl.innerText?.trim();
-				if (!text) return;
+        document.body.appendChild(container);
 
-				let type = 'paragraph';
-				if (row.classList.contains('listitem-heading')) {
-					type = 'heading';
-				} else if (row.classList.contains('listitem-ulist')) {
-					type = 'ulist';
-				}
-				content.push({ type, text });
-			});
+        const style = document.createElement('style');
+        style.id = 'thymer-pdf-print-style';
+        style.textContent = `
+            @media print {
+                body > *:not(#thymer-pdf-export) { display: none !important; }
+                #thymer-pdf-export { display: block !important; position: static; width: auto; }
+                @page { margin: 0.5in; }
+            }
+        `;
+        document.head.appendChild(style);
 
-			return content;
-		} catch {
-			return [];
-		}
-	}
+        this.ui.addToaster({
+            title: "Export to PDF",
+            message: "Choose 'Save as PDF' in the print dialog.",
+            dismissible: false,
+            autoDestroyTime: 3000,
+        });
 
-	exportToPDF() {
-		const title = this.getNoteTitle();
-		const content = this.getAllContent();
+        setTimeout(() => {
+            window.print();
+            setTimeout(() => {
+                container.remove();
+                style.remove();
+            }, 1000);
+        }, 300);
+    }
 
-		if (!content.length) {
-			this.ui.addToaster({
-				title: "❌ Nothing to export",
-				message: "Thymer content could not be detected",
-				autoDestroyTime: 2500
-			});
-			return;
-		}
+    renderItems(items, container, allItems, depth) {
+        let currentList = null;
+        let currentListType = null;
 
-		const container = document.createElement('div');
-		container.id = 'thymer-pdf-export';
-		container.style.cssText = `
-			background: white;
-			color: black;
-			font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-			font-size: 12pt;
-			line-height: 1.6;
-			padding: 0.75in;
-			max-width: 8.5in;
-		`;
+        for (const item of items) {
+            const children = allItems.filter(i => i.parent_guid === item.guid);
+            const type = item.type;
 
-		const h1 = document.createElement('h1');
-		h1.textContent = title;
-		h1.style.marginBottom = '1em';
-		container.appendChild(h1);
+            // Close any open list if this item isn't a list type
+            if (type !== 'ulist' && type !== 'olist' && type !== 'task') {
+                currentList = null;
+                currentListType = null;
+            }
 
-		let currentUL = null;
+            if (type === 'br' || type === 'empty') {
+                currentList = null;
+                currentListType = null;
+                continue;
+            }
 
-		content.forEach(item => {
-			if (item.type === 'ulist') {
-				if (!currentUL) {
-					currentUL = document.createElement('ul');
-					currentUL.style.marginBottom = '0.75em';
-					container.appendChild(currentUL);
-				}
-				const li = document.createElement('li');
-				li.textContent = item.text;
-				currentUL.appendChild(li);
-				return;
-			}
+            if (type === 'heading') {
+                currentList = null;
+                currentListType = null;
+                const size = item.getHeadingSize?.() ?? 1;
+                const level = Math.min(size + 1, 6); // h1 is the title, so start at h2
+                const el = document.createElement(`h${level}`);
+                el.style.cssText = 'margin: 0.8em 0 0.3em 0;';
+                el.appendChild(this.segmentsToSpan(item.segments));
+                container.appendChild(el);
+                if (children.length) this.renderItems(children, container, allItems, depth + 1);
+                continue;
+            }
 
-			currentUL = null;
+            if (type === 'task') {
+                if (currentListType !== 'task') {
+                    currentList = document.createElement('ul');
+                    currentList.style.cssText = 'list-style: none; padding-left: ' + (depth * 20 + 20) + 'px; margin: 0.3em 0;';
+                    container.appendChild(currentList);
+                    currentListType = 'task';
+                }
+                const li = document.createElement('li');
+                const isDone = item.isTaskCompleted?.() === true;
+                const checkbox = isDone ? '☑' : '☐';
+                li.style.cssText = `margin: 0.15em 0; ${isDone ? 'color: #999; text-decoration: line-through;' : ''}`;
+                const checkSpan = document.createElement('span');
+                checkSpan.textContent = checkbox + ' ';
+                checkSpan.style.marginRight = '4px';
+                li.appendChild(checkSpan);
+                li.appendChild(this.segmentsToSpan(item.segments));
+                currentList.appendChild(li);
+                if (children.length) this.renderItems(children, li, allItems, depth + 1);
+                continue;
+            }
 
-			if (item.type === 'heading') {
-				const h2 = document.createElement('h2');
-				h2.textContent = item.text;
-				h2.style.margin = '0.8em 0 0.4em';
-				container.appendChild(h2);
-				return;
-			}
+            if (type === 'ulist') {
+                if (currentListType !== 'ulist') {
+                    currentList = document.createElement('ul');
+                    currentList.style.cssText = 'padding-left: ' + (depth * 20 + 20) + 'px; margin: 0.3em 0;';
+                    container.appendChild(currentList);
+                    currentListType = 'ulist';
+                }
+                const li = document.createElement('li');
+                li.style.margin = '0.15em 0';
+                li.appendChild(this.segmentsToSpan(item.segments));
+                currentList.appendChild(li);
+                if (children.length) this.renderItems(children, li, allItems, depth + 1);
+                continue;
+            }
 
-			const p = document.createElement('p');
-			p.textContent = item.text;
-			p.style.marginBottom = '0.5em';
-			container.appendChild(p);
-		});
+            if (type === 'olist') {
+                if (currentListType !== 'olist') {
+                    currentList = document.createElement('ol');
+                    currentList.style.cssText = 'padding-left: ' + (depth * 20 + 20) + 'px; margin: 0.3em 0;';
+                    container.appendChild(currentList);
+                    currentListType = 'olist';
+                }
+                const li = document.createElement('li');
+                li.style.margin = '0.15em 0';
+                li.appendChild(this.segmentsToSpan(item.segments));
+                currentList.appendChild(li);
+                if (children.length) this.renderItems(children, li, allItems, depth + 1);
+                continue;
+            }
 
-		document.body.appendChild(container);
+            if (type === 'quote' || type === 'block') {
+                currentList = null;
+                currentListType = null;
+                const blockquote = document.createElement('blockquote');
+                blockquote.style.cssText = 'border-left: 3px solid #ccc; margin: 0.5em 0 0.5em ' + (depth * 20) + 'px; padding: 0.3em 0.8em; color: #555;';
+                blockquote.appendChild(this.segmentsToSpan(item.segments));
+                container.appendChild(blockquote);
+                if (children.length) this.renderItems(children, blockquote, allItems, depth + 1);
+                continue;
+            }
 
-		const style = document.createElement('style');
-		style.id = 'thymer-pdf-print-style';
-		style.textContent = `
-			@media print {
-				body > *:not(#thymer-pdf-export) {
-					display: none !important;
-				}
-				#thymer-pdf-export {
-					display: block !important;
-					position: static;
-					width: auto;
-				}
-				@page { margin: 0.5in; }
-			}
-		`;
-		document.head.appendChild(style);
+            // Default: text / paragraph
+            currentList = null;
+            currentListType = null;
+            if (!item.segments?.length) continue;
+            const p = document.createElement('p');
+            p.style.cssText = 'margin: 0.3em 0 0.3em ' + (depth * 20) + 'px;';
+            p.appendChild(this.segmentsToSpan(item.segments));
+            container.appendChild(p);
+            if (children.length) this.renderItems(children, container, allItems, depth + 1);
+        }
+    }
 
-		this.ui.addToaster({
-			title: "📄 Exporting to PDF",
-			message: "Choose “Save as PDF” in the print dialog",
-			autoDestroyTime: 3000
-		});
+    segmentsToSpan(segments) {
+        const frag = document.createDocumentFragment();
+        if (!segments?.length) return frag;
 
-		setTimeout(() => {
-			window.print();
-			setTimeout(() => {
-				container.remove();
-				style.remove();
-			}, 1000);
-		}, 300);
-	}
+        for (const seg of segments) {
+            const text = typeof seg.text === 'string' ? seg.text : '';
+
+            if (seg.type === 'bold') {
+                const el = document.createElement('strong');
+                el.textContent = text;
+                frag.appendChild(el);
+            } else if (seg.type === 'italic') {
+                const el = document.createElement('em');
+                el.textContent = text;
+                frag.appendChild(el);
+            } else if (seg.type === 'code') {
+                const el = document.createElement('code');
+                el.textContent = text;
+                el.style.cssText = 'background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-size: 0.9em;';
+                frag.appendChild(el);
+            } else if (seg.type === 'link') {
+                const el = document.createElement('a');
+                el.href = text;
+                el.textContent = text;
+                el.style.color = '#333';
+                frag.appendChild(el);
+            } else if (seg.type === 'linkobj') {
+                const el = document.createElement('a');
+                el.href = seg.text?.link ?? '#';
+                el.textContent = seg.text?.title ?? seg.text?.link ?? '';
+                el.style.color = '#333';
+                frag.appendChild(el);
+            } else if (seg.type === 'datetime') {
+                const el = document.createElement('span');
+                el.textContent = text;
+                el.style.cssText = 'background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-size: 0.9em;';
+                frag.appendChild(el);
+            } else if (seg.type === 'hashtag') {
+                const el = document.createElement('span');
+                el.textContent = text;
+                el.style.color = '#555';
+                frag.appendChild(el);
+            } else {
+                // text, mention, ref, icon — just render as plain text
+                const el = document.createTextNode(text);
+                frag.appendChild(el);
+            }
+        }
+
+        return frag;
+    }
 }
