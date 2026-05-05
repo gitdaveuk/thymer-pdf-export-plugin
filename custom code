@@ -45,7 +45,8 @@ class Plugin extends AppPlugin {
         h1.style.cssText = 'margin: 0 0 1em 0; font-size: 22pt; border-bottom: 1px solid #ddd; padding-bottom: 0.3em;';
         container.appendChild(h1);
 
-        this.renderItems(topLevel, container, lineItems, 0);
+        const objectUrls = [];
+        await this.renderItems(topLevel, container, lineItems, 0, objectUrls);
 
         document.body.appendChild(container);
 
@@ -70,13 +71,21 @@ class Plugin extends AppPlugin {
         setTimeout(() => {
             window.print();
             setTimeout(() => {
+                objectUrls.forEach((u) => URL.revokeObjectURL(u));
                 container.remove();
                 style.remove();
             }, 1000);
         }, 300);
     }
 
-    renderItems(items, container, allItems, depth) {
+    appendBlankParagraph(container, depth) {
+        const p = document.createElement('p');
+        p.style.cssText = 'margin: 0.3em 0 0.3em ' + (depth * 20) + 'px;';
+        p.appendChild(document.createElement('br'));
+        container.appendChild(p);
+    }
+
+    async renderItems(items, container, allItems, depth, objectUrls) {
         let currentList = null;
         let currentListType = null;
 
@@ -93,6 +102,8 @@ class Plugin extends AppPlugin {
             if (type === 'br' || type === 'empty') {
                 currentList = null;
                 currentListType = null;
+                this.appendBlankParagraph(container, depth);
+                if (children.length) await this.renderItems(children, container, allItems, depth + 1, objectUrls);
                 continue;
             }
 
@@ -105,7 +116,7 @@ class Plugin extends AppPlugin {
                 el.style.cssText = 'margin: 0.8em 0 0.3em 0;';
                 el.appendChild(this.segmentsToSpan(item.segments));
                 container.appendChild(el);
-                if (children.length) this.renderItems(children, container, allItems, depth + 1);
+                if (children.length) await this.renderItems(children, container, allItems, depth + 1, objectUrls);
                 continue;
             }
 
@@ -126,7 +137,7 @@ class Plugin extends AppPlugin {
                 li.appendChild(checkSpan);
                 li.appendChild(this.segmentsToSpan(item.segments));
                 currentList.appendChild(li);
-                if (children.length) this.renderItems(children, li, allItems, depth + 1);
+                if (children.length) await this.renderItems(children, li, allItems, depth + 1, objectUrls);
                 continue;
             }
 
@@ -141,7 +152,7 @@ class Plugin extends AppPlugin {
                 li.style.margin = '0.15em 0';
                 li.appendChild(this.segmentsToSpan(item.segments));
                 currentList.appendChild(li);
-                if (children.length) this.renderItems(children, li, allItems, depth + 1);
+                if (children.length) await this.renderItems(children, li, allItems, depth + 1, objectUrls);
                 continue;
             }
 
@@ -156,7 +167,7 @@ class Plugin extends AppPlugin {
                 li.style.margin = '0.15em 0';
                 li.appendChild(this.segmentsToSpan(item.segments));
                 currentList.appendChild(li);
-                if (children.length) this.renderItems(children, li, allItems, depth + 1);
+                if (children.length) await this.renderItems(children, li, allItems, depth + 1, objectUrls);
                 continue;
             }
 
@@ -167,19 +178,67 @@ class Plugin extends AppPlugin {
                 blockquote.style.cssText = 'border-left: 3px solid #ccc; margin: 0.5em 0 0.5em ' + (depth * 20) + 'px; padding: 0.3em 0.8em; color: #555;';
                 blockquote.appendChild(this.segmentsToSpan(item.segments));
                 container.appendChild(blockquote);
-                if (children.length) this.renderItems(children, blockquote, allItems, depth + 1);
+                if (children.length) await this.renderItems(children, blockquote, allItems, depth + 1, objectUrls);
+                continue;
+            }
+
+            if (type === 'image') {
+                currentList = null;
+                currentListType = null;
+                const wrap = document.createElement('div');
+                wrap.style.cssText = 'margin: 0.5em 0 0.5em ' + (depth * 20) + 'px;';
+                let shown = false;
+                try {
+                    const blob = await item.getBlob();
+                    if (blob) {
+                        const buf = await blob.download();
+                        if (buf && buf.byteLength > 0) {
+                            const mime = blob.contentType || 'application/octet-stream';
+                            const url = URL.createObjectURL(new Blob([buf], { type: mime }));
+                            objectUrls.push(url);
+                            const img = document.createElement('img');
+                            img.src = url;
+                            img.alt = blob.fileName || '';
+                            img.style.cssText = 'max-width: 100%; height: auto; display: block;';
+                            const applyImageScale = () => {
+                                const w = img.naturalWidth;
+                                if (w > 0) {
+                                    img.style.width = `${Math.round(w * 0.65)}px`;
+                                }
+                            };
+                            img.onload = applyImageScale;
+                            if (img.complete) applyImageScale();
+                            wrap.appendChild(img);
+                            shown = true;
+                        }
+                    }
+                } catch (_) { /* blob unavailable */ }
+                if (!shown) {
+                    const fallback = document.createElement('span');
+                    fallback.style.cssText = 'color: #888; font-style: italic;';
+                    fallback.textContent = '[Image]';
+                    wrap.appendChild(fallback);
+                }
+                container.appendChild(wrap);
+                if (children.length) await this.renderItems(children, container, allItems, depth + 1, objectUrls);
                 continue;
             }
 
             // Default: text / paragraph
             currentList = null;
             currentListType = null;
-            if (!item.segments?.length) continue;
+            if (!item.segments?.length) {
+                if (type === 'text') {
+                    this.appendBlankParagraph(container, depth);
+                    if (children.length) await this.renderItems(children, container, allItems, depth + 1, objectUrls);
+                }
+                continue;
+            }
             const p = document.createElement('p');
             p.style.cssText = 'margin: 0.3em 0 0.3em ' + (depth * 20) + 'px;';
             p.appendChild(this.segmentsToSpan(item.segments));
             container.appendChild(p);
-            if (children.length) this.renderItems(children, container, allItems, depth + 1);
+            if (children.length) await this.renderItems(children, container, allItems, depth + 1, objectUrls);
         }
     }
 
